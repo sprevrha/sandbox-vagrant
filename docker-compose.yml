@@ -1,0 +1,54 @@
+## Docker Compose file for WordPress with MariaDB and Nginx
+# This file sets up a WordPress site with a MariaDB database and Nginx as the web server.
+# It includes the necessary environment variables and volume mounts for persistent storage. 
+version: '3.8'
+
+services:
+  db:
+    image: mariadb:latest
+    container_name: mariadb
+    environment:
+      MYSQL_ROOT_PASSWORD: root4u!
+      MYSQL_DATABASE: wordpress
+      MYSQL_USER: mdb_wp
+      MYSQL_PASSWORD: mdp4u!
+    volumes:
+      - db_data:/var/lib/mysql
+    networks:
+      - wordpress_network
+
+  wordpress:
+    depends_on:
+      - db
+    image: wordpress:latest
+    container_name: wordpress
+    environment:
+      WORDPRESS_DB_HOST: db:3306
+      WORDPRESS_DB_USER: mdb_wp
+      WORDPRESS_DB_PASSWORD: mdp4u!
+      WORDPRESS_DB_NAME: wordpress
+    volumes:
+      - wordpress_data:/var/www/html
+    networks:
+      - wordpress_network
+
+  nginx:
+    depends_on:
+      - wordpress
+    image: nginx:latest
+    container_name: nginx
+    ports:
+      - "80:80"
+    volumes:
+      - wordpress_data:/var/www/html
+      - ./nginx-conf:/etc/nginx/conf.d
+    networks:
+      - wordpress_network
+
+volumes:
+  db_data:
+  wordpress_data:
+
+networks:
+  wordpress_network:
+    driver: bridge
