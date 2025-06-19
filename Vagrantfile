@@ -55,7 +55,6 @@ Vagrant.configure("2") do |config|
   # Second provisioner: everything else (will run after 'vagrant reload --provision')
   config.vm.provision "rest", run: "always", preserve_order: true,
   type: "shell", 
-  env: { "BRANCH" => ENV["BRANCH"] || "main" }, # default to main branch if not set
   inline: <<-SHELL
     # ... rest of your provisioning (Docker, Git, etc.) ...
     # Install required tools
@@ -117,9 +116,14 @@ Vagrant.configure("2") do |config|
     echo "Enable and start Docker"
     sudo systemctl enable docker
     sudo systemctl start docker
+  SHELL
 
+  # Third provisioner: clone or pull the Git repository 
+  config.vm.provision "git-pull", run: "always", preserve_order: true,
+  type: "shell", 
+  env: { "BRANCH" => ENV["BRANCH"] || "main" }, # default to main branch if not set
+  inline: <<-SHELL
     REPO_URL="https://github.com/sprevrha/sandbox-vagrant.git"
-    BRANCH=ENV['BRANCH'] || "main" # check for env var
     echo "Clone or pull branch $BRANCH from Git repository $REPO_URL"
     TARGET_DIR="/opt/sandbox-vagrant-$BRANCH"
     if git ls-remote --exit-code --heads "$REPO_URL" "$BRANCH" >/dev/null 2>&1; then
@@ -137,15 +141,37 @@ Vagrant.configure("2") do |config|
       echo "ERROR: Repository or branch does not exist: $REPO_URL ($BRANCH)" >&2
       exit 1
     fi
+  SHELL
 
+  # Third provisioner: clone or pull the Git repository 
+  config.vm.provision "docker-up", run: "always", preserve_order: true,
+  env: { "BRANCH" => ENV["BRANCH"] || "main" }, # default to main branch if not set
+  type: "shell", 
+  inline: <<-SHELL
+    TARGET_DIR="/opt/sandbox-vagrant-$BRANCH"
     echo "Ensure the docker-compose.yml file is present"
     cd $TARGET_DIR
     if [ ! -f docker-compose.yml ]; then 
       echo "docker-compose.yml not found in $TARGET_DIR. Exiting."
       exit 1 
     fi
-
     echo "Start the Docker containers (using Compose v2 plugin)"
     sudo docker compose up -d
+    if [ $? -ne 0 ]; then
+      echo "Failed to start Docker containers. Exiting."
+      exit 1
+    fi
+    echo "Docker containers started successfully."
   SHELL
+
+  # Final provisioner: cleanup and finish
+  config.vm.provision "cleanup", run: "always", preserve_order: true,
+  type: "shell", 
+  inline: <<-SHELL
+    echo "Cleaning up..."
+    sudo apt-get autoremove -y
+    sudo apt-get clean
+    echo "Provisioning complete."
+  SHELL
+
 end
