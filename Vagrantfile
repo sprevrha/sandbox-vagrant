@@ -128,11 +128,11 @@ Vagrant.configure("2") do |config|
     TARGET_DIR="/opt/sandbox-vagrant-$BRANCH"
     if git ls-remote --exit-code --heads "$REPO_URL" "$BRANCH" >/dev/null 2>&1; then
       if [ ! -d "$TARGET_DIR" ]; then
-        sudo git clone -b "$BRANCH" "$REPO_URL" "$TARGET_DIR"
+        git clone -b "$BRANCH" "$REPO_URL" "$TARGET_DIR"
       elif [ -d "$TARGET_DIR/.git" ]; then
         echo "Directory $TARGET_DIR exists and is a git repository. Pulling latest changes..."
         cd "$TARGET_DIR"
-        sudo git pull origin "$BRANCH"
+        git pull origin "$BRANCH"
       else
         echo "ERROR: $TARGET_DIR exists but is not a git repository." >&2
         exit 1
