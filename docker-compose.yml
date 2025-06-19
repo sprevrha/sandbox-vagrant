@@ -27,6 +27,8 @@ services:
       WORDPRESS_DB_USER: mdb_wp
       WORDPRESS_DB_PASSWORD: mdp4u!
       WORDPRESS_DB_NAME: wordpress
+      WORDPRESS_SITEURL: http://localhost:8081
+      WORDPRESS_HOME: http://localhost:8081
     volumes:
       - wordpress_data:/var/www/html
     networks:
