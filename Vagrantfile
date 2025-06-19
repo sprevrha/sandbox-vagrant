@@ -5,7 +5,10 @@ Vagrant.configure("2") do |config|
   config.vm.box = "ubuntu/bionic64"
   config.vm.provider "virtualbox" do |vb|
     vb.memory = "2048"
-  end
+  config.vm.network "forwarded_port", guest: 8081, host: 8081
+ end
+
+   
   #  headers must be present before Guest Additions are built.
   config.vbguest.auto_update = false
   config.vm.provision "arch", 
@@ -141,6 +144,7 @@ Vagrant.configure("2") do |config|
       echo "ERROR: Repository or branch does not exist: $REPO_URL ($BRANCH)" >&2
       exit 1
     fi
+    sudo chown -R vagrant:vagrant /opt/sandbox-vagrant-$BRANCH
   SHELL
 
   # Third provisioner: clone or pull the Git repository 
