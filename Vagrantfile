@@ -147,7 +147,7 @@ Vagrant.configure("2") do |config|
     sudo chown -R vagrant:vagrant /opt/sandbox-vagrant-$BRANCH
   SHELL
 
-  # Third provisioner: clone or pull the Git repository 
+  # Fourth provisioner: start docker containers using docker-compose 
   config.vm.provision "docker-up", run: "always", preserve_order: true,
   env: { "BRANCH" => ENV["BRANCH"] || "main" }, # default to main branch if not set
   type: "shell", 

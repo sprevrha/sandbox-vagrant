@@ -1,6 +1,4 @@
-# Makefile for setting up a Vagrant 
-
-# environment with a specific box and provisioning script
+# Makefile for setting up a Vagrant environment with a specific box and provisioning script
 install_vbguest_plugin:
 	@vagrant plugin list | findstr vagrant-vbguest >nul || vagrant plugin install vagrant-vbguest
 
