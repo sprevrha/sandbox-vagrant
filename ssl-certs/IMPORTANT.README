@@ -1,0 +1,2 @@
+These are default, self-signed certificates and should not be used in production. For a "state-of-the-art" setup, you should use certificates from a trusted Certificate Authority (CA) like Let's Encrypt, typically automated with a tool like Certbot or an Nginx-ready ACME client.
+For the dhparam.pem file, for a production environment, you would typically integrate this with automated certificate management tools (like Certbot for Let's Encrypt), which often handle DH parameter generation as well. For local development, this manual process is perfectly fine.

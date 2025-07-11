@@ -1,0 +1,235 @@
+# This configuration sets up FastCGI gateway for a WordPress-FPM instance running in a Docker container.
+# It listens on port 80 and forwards requests to the WordPress container.
+
+# FastCGI Cache Zone for Redis
+fastcgi_cache_path /var/cache/nginx levels=1:2 keys_zone=WORDPRESS:100m inactive=60m;
+fastcgi_cache_key "$scheme$request_method$host$request_uri";
+fastcgi_cache_use_stale error timeout invalid_header http_500;
+fastcgi_ignore_headers Cache-Control Expires Set-Cookie;
+fastcgi_cache WORDPRESS;
+fastcgi_cache_valid 200 301 302 60m;
+fastcgi_cache_background_update on;
+fastcgi_cache_lock on;
+fastcgi_cache_lock_timeout 5s;
+fastcgi_cache_bypass $http_cache_control;
+fastcgi_no_cache $http_cache_control;
+fastcgi_cache_methods GET HEAD POST;
+fastcgi_cache_min_uses 1;
+fastcgi_cache_revalidate on;
+# FastCGI Cache Purge
+map $http_x_purge $purge {
+    default 0;
+    "~^purge$" 1;
+}
+# FastCGI Purge Location
+location ~ /purge(/.*) {
+    allow all;
+    fastcgi_cache_purge WORDPRESS $purge;
+}
+# FastCGI Cache Purge for specific paths
+location ~ /wp-admin/ {
+    allow all;
+    # never chache
+    fastcgi_cache_bypass 1; 
+    fastcgi_no_cache 1; 
+}
+# NGINX Configuration for WordPress with FastCGI and SSL
+# This configuration is designed to work with a WordPress instance running in a Docker container.
+# It includes SSL support, FastCGI processing, and various security headers.
+
+# HTTP Server - redirects to HTTPS
+server {
+    listen 80;
+    server_name ${NGINX_SERVER_NAME} ${NGINX_SERVER_ALIAS};
+    # Redirect all HTTP requests to HTTPS
+    return 301 https://$host$request_uri;
+}
+
+# HTTPS Server
+server {
+    listen ${NGINX_SSL_PORT} ssl http2;
+    server_name ${NGINX_SERVER_NAME} ${NGINX_SERVER_ALIAS};
+
+    # Document Root
+    root ${NGINX_ROOT_DIR};
+    index ${NGINX_INDEX};    
+    
+    # Logging
+    access_log ${NGINX_ACCESS_LOG} ${NGINX_LOG_FORMAT};
+    error_log ${NGINX_ERROR_LOG};
+    
+    # Client Body Size
+    client_max_body_size ${NGINX_CLIENT_MAX_BODY_SIZE};
+    client_body_buffer_size ${NGINX_CLIENT_BODY_BUFFER_SIZE};
+    client_header_buffer_size ${NGINX_CLIENT_HEADER_BUFFER_SIZE};
+    large_client_header_buffers ${NGINX_LARGE_CLIENT_HEADER_BUFFERS};
+    
+    # Connection Settings
+    client_body_timeout ${NGINX_CLIENT_BODY_TIMEOUT};
+    client_header_timeout ${NGINX_CLIENT_HEADER_TIMEOUT};
+    keepalive_timeout ${NGINX_KEEPALIVE_TIMEOUT};
+    send_timeout ${NGINX_SEND_TIMEOUT};
+    keepalive_requests ${NGINX_KEEPALIVE_REQUESTS};
+    sendfile ${NGINX_SENDFILE};
+    tcp_nopush ${NGINX_TCP_NOPUSH};
+    tcp_nodelay ${NGINX_TCP_NODELAY};
+    reset_timedout_connection ${NGINX_RESET_TIMEDOUT_CONNECTION};
+    server_tokens ${NGINX_SERVER_TOKENS};
+    underscores_in_headers ${NGINX_UNDERSCORES_IN_HEADERS};
+    charset ${NGINX_CHARSET};
+    charset_types ${NGINX_CHARSET_TYPES};
+
+    # Gzip settings - PLACE THESE HERE
+    gzip ${NGINX_GZIP};
+    gzip_comp_level ${NGINX_GZIP_COMP_LEVEL};
+    gzip_min_length ${NGINX_GZIP_MIN_LENGTH};
+    gzip_proxied ${NGINX_GZIP_PROXIED};
+    gzip_types ${NGINX_GZIP_TYPES};
+    gzip_vary ${NGINX_GZIP_VARY};
+    gzip_disable "${NGINX_GZIP_DISABLE}"; # quotes for the regex pattern
+    gzip_http_version ${NGINX_GZIP_HTTP_VERSION};
+
+    # SSL Configuration  
+    ssl_certificate ${NGINX_SSL_CERT};
+    ssl_certificate_key ${NGINX_SSL_CERT_KEY};
+    ssl_trusted_certificate ${NGINX_SSL_TRUSTED_CERT};
+    ssl_protocols ${NGINX_SSL_PROTOCOLS};
+    ssl_ciphers ${NGINX_SSL_CIPHERS};
+    ssl_prefer_server_ciphers ${NGINX_PREFER_SERVER_CIPHERS};
+    ssl_session_cache ${NGINX_SSL_SESSION_CACHE};
+    ssl_session_timeout ${NGINX_SSL_SESSION_TIMEOUT};
+    ssl_session_tickets ${NGINX_SSL_SESSION_TICKET};
+    ssl_dhparam ${NGINX_SSL_DHPARAM};
+    ssl_stapling ${NGINX_SSL_STAPLING};
+    ssl_stapling_verify ${NGINX_SSL_STAPLING_VERIFY};
+    ssl_dhparam ${NGINX_SSL_DHPARAM}; # Ensure you have a strong DH parameter file
+
+    # Security headers
+    add_header X-Frame-Options ${NGINX_X_FRAME_OPTIONS} always;
+    add_header X-Content-Type-Options ${NGINX_X_CONTENT_TYPE_OPTIONS} always;
+    add_header X-XSS-Protection ${NGINX_X_XSS_PROTECTION} always;
+    add_header Referrer-Policy ${NGINX_REFERRER_POLICY} always;
+    add_header Content-Security-Policy ${NGINX_CONTENT_SECURITY_POLICY} always;
+    add_header Strict-Transport-Security ${NGINX_STRICT_TRANSPORT_SECURITY} always;
+
+    # Types Hash Settings
+    types_hash_max_size ${NGINX_TYPES_HASH_MAX_SIZE};
+    types_hash_bucket_size ${NGINX_TYPES_HASH_BUCKET_SIZE};
+    types_hash_min_uses ${NGINX_TYPES_HASH_MIN_USES};
+    types_hash_max_size ${NGINX_TYPES_HASH_MAX_SIZE};
+
+    # DNS Resolver
+    resolver ${NGINX_RESOLVER} valid=${NGINX_RESOLVER_VALID};
+    resolver_timeout ${NGINX_RESOLVER_TIMEOUT};
+    
+    # Optional: Enable rewrite log for debugging
+    rewrite_log ${NGINX_REWRITE_LOG};
+
+    # Add Cache-Status Header
+    add_header X-Cache-Status $upstream_cache_status;
+    # Add X-Forwarded-For Header
+    add_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    
+    # WordPress main location
+    location / {
+        try_files $uri $uri/ /index.php?$args;
+    }
+    
+    # PHP processing - Main block (consolidated)
+    location ~ \.php$ {
+        try_files $uri =404;
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        fastcgi_pass ${NGINX_PROXY_PASS};
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_param PATH_INFO $fastcgi_path_info;
+        fastcgi_param HTTP_X_FORWARDED_PROTO https;
+        fastcgi_param HTTPS on;
+        include fastcgi_params;
+        
+        # WordPress specific FastCGI parameters
+        fastcgi_read_timeout ${NGINX_PROXY_READ_TIMEOUT};
+        fastcgi_buffer_size ${NGINX_PROXY_BUFFER_SIZE};
+        fastcgi_buffers ${NGINX_PROXY_BUFFERS};
+        fastcgi_busy_buffers_size ${NGINX_PROXY_BUSY_BUFFERS_SIZE};
+        fastcgi_temp_file_write_size ${NGINX_PROXY_TEMP_FILE_WRITE_SIZE};
+        fastcgi_connect_timeout ${NGINX_PROXY_CONNECT_TIMEOUT};
+        fastcgi_send_timeout ${NGINX_PROXY_SEND_TIMEOUT};
+        fastcgi_intercept_errors on;
+
+    }
+    
+    # Static assets caching
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg)$ {
+        expires 30d;
+        access_log off;
+        add_header Cache-Control "public, no-transform" always;
+    }
+    
+    # Font files
+    location ~* \.(eot|ttf|woff|woff2|otf)$ {
+        expires 1y;
+        access_log off;
+        add_header Access-Control-Allow-Origin * always;
+        add_header Cache-Control "public, no-transform" always;
+    }
+    
+    # Media files
+    location ~* \.(mp4|webm|ogg|ogv|mp3|wav)$ {
+        expires 30d;
+        access_log off;
+        add_header Cache-Control "public, no-transform" always;
+    }
+    
+    # Document files
+    location ~* \.(pdf|doc|docx|xls|xlsx|ppt|pptx)$ {
+        expires 30d;
+        access_log off;
+        add_header Cache-Control "public, no-transform" always;
+    }
+    
+    # Archive files
+    location ~* \.(zip|tar|gz|rar)$ {
+        expires 1y;
+        access_log off;
+        add_header Cache-Control "public, no-transform" always;
+    }
+    
+    # Data files
+    location ~* \.(json|xml|txt)$ {
+        expires 1d;
+        access_log off;
+        add_header Cache-Control "public, no-transform" always;
+    }
+    
+    # WordPress specific security
+    location ~ /\.ht {
+        deny all;
+    }
+    
+    # Hide WordPress sensitive files
+    location ~* \.(txt|log|conf)$ {
+        deny all;
+    }
+    
+    # WordPress admin-ajax.php (don't cache)
+    location = /wp-admin/admin-ajax.php {
+        try_files $uri =404;
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        fastcgi_pass ${NGINX_PROXY_PASS};
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        include fastcgi_params;
+        fastcgi_read_timeout ${NGINX_PROXY_READ_TIMEOUT};
+    }
+    
+    # WordPress uploads directory
+    location ~* /wp-content/uploads/.*\.php$ {
+        deny all;
+    }
+    
+    # WordPress includes directory
+    location ~* /wp-includes/.*\.php$ {
+        deny all;
+    }
+}

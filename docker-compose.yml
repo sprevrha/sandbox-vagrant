@@ -1,56 +1,277 @@
 ## Docker Compose file for WordPress with MariaDB and Nginx
-# This file sets up a WordPress site with a MariaDB database and Nginx as the web server.
+# This file sets up a WordPress site with a MariaDB database and Nginx as FastCGI PHP frontend.
 # It includes the necessary environment variables and volume mounts for persistent storage. 
-version: '3.8'
 
 services:
   db:
-    image: mariadb:latest
+    image: mariadb:10.11
     container_name: mariadb
     environment:
-      MYSQL_ROOT_PASSWORD: root4u!
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
       MYSQL_DATABASE: wordpress
-      MYSQL_USER: mdb_wp
-      MYSQL_PASSWORD: mdp4u!
+      MYSQL_USER_FILE: /run/secrets/db_user
+      MYSQL_PASSWORD_FILE: /run/secrets/db_password
     volumes:
       - db_data:/var/lib/mysql
     networks:
       - wordpress_network
+    secrets:
+      - db_root_password
+      - db_user
+      - db_password
 
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    command: redis-server --appendonly yes --requirepass $$(cat /run/secrets/redis_password)
+    volumes:
+      - redis_data:/data
+    networks:
+      - wordpress_network
+    restart: unless-stopped
+    healthcheck:
+      # Option 1: Using CMD-SHELL for robustness with secrets
+      test: ["CMD-SHELL", "redis-cli -a \"$$(cat /run/secrets/redis_password)\" ping | grep PONG"]
+      interval: 30s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    secrets:
+      - redis_password
+
+  # WordPress service using PHP-FPM
+  # This service runs the WordPress application with PHP-FPM.
   wordpress:
     depends_on:
       - db
-    image: wordpress:latest
+      - redis
+    image: wordpress:latest-fpm
     container_name: wordpress
     environment:
       WORDPRESS_DB_HOST: db:3306
-      WORDPRESS_DB_USER: mdb_wp
-      WORDPRESS_DB_PASSWORD: mdp4u!
+      WORDPRESS_DB_USER_FILE: /run/secrets/db_user
+      WORDPRESS_DB_PASSWORD_FILE: /run/secrets/db_password
       WORDPRESS_DB_NAME: wordpress
-      WORDPRESS_SITEURL: http://localhost:8081
-      WORDPRESS_HOME: http://localhost:8081
+      WORDPRESS_CONFIG_EXTRA: |
+        define('WP_HOME', 'https://spendoo.app');
+        define('WP_SITEURL', 'https://spendoo.app');
+        define('FORCE_SSL_ADMIN', true);
+        // Reverse Proxy SSL Detection
+        if (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https') {
+          $_SERVER['HTTPS'] = 'on';
+        }
+        // Alternative: For Load Balancer 
+        if (isset($_SERVER['HTTP_X_FORWARDED_SSL']) && $_SERVER['HTTP_X_FORWARDED_SSL'] === 'on') {
+          $_SERVER['HTTPS'] = 'on';
+        }       
+        // Redis Object Cache Configuration
+        # define('WP_REDIS_DISABLED', true);
+        define('WP_REDIS_HOST', 'redis');
+        define('WP_REDIS_PORT', 6379);
+        define('WP_REDIS_PASSWORD', file_get_contents('/run/secrets/redis_password'));
+        define('WP_REDIS_CLIENT', 'phpredis');            // Use phpredis client
+        define('WP_REDIS_DATABASE', 0);
+        define('WP_REDIS_TIMEOUT', 1);
+        define('WP_REDIS_READ_TIMEOUT', 1);
+        define('WP_REDIS_MAXTTL', 86400);
+        define('WP_REDIS_SCHEME', 'tcp');
+
+        define('DISABLE_WP_CRON', true);                  // Disable WP-Cron to use a real cron job instead
+        define('XMLRPC_REQUEST', false);                  // Disable XML-RPC for security
+        define('REST_API_DISABLED', true);                // Disable the REST API for security
+        define('HEARTBEAT_DISABLED', true);               // Disable the WordPress heartbeat API
+        define('AUTOMATIC_UPDATER_DISABLED', true);       // Disable automatic updates
+        add_filter('show_admin_bar', '__return_false');   // Disable the admin bar for all users
+        remove_action('wp_head', 'wp_generator');         // Disable the WordPress version in the HTML source
+        remove_action('wp_head', 'print_emoji_detection_script', 7);  // Disable the emoji script
+        remove_action('wp_print_styles', 'print_emoji_styles');       // Disable the REST API link in the HTML source
+        remove_action('wp_head', 'rest_output_link_wp_head', 10);     // Disable the REST API link in the HTML source 
+        remove_action('wp_head', 'wp_oembed_add_discovery_links');    // Disable the oEmbed discovery links
+        remove_action('wp_head', 'wp_oembed_add_host_js');            // Disable the oEmbed JavaScript
+        add_filter('the_generator', '__return_empty_string');         // Disable the WordPress version in the RSS feed
+        // Disable the WordPress version in the HTML source
+        add_filter('style_loader_src', 'remove_wp_version_from_css_js', 9999);
+        add_filter('script_loader_src', 'remove_wp_version_from_css_js', 9999);
+        function remove_wp_version_from_css_js($src) {
+            if (strpos($src, 'ver=') !== false) {
+                $src = remove_query_arg('ver', $src);
+            }
+            return $src;
+        }
+        // Cache-Konfiguration
+        define('WP_CACHE', true);
+        define('WP_CACHE_KEY_SALT', 'spendoo_'); 
+        // Addional security settings
+        define('FORCE_SSL_LOGIN', true);
+        define('DISALLOW_FILE_EDIT', true);
+        define('WP_ALLOW_REPAIR', false);
+        define('WP_POST_REVISIONS', 5);
+        define('AUTOSAVE_INTERVAL', 300); // 5 minutes
+        define('WP_MEMORY_LIMIT', '256M');
+        define('WP_MAX_MEMORY_LIMIT', '512M');
+        // Debugging settings
+        # Uncomment the following lines to disable debugging
+        # define('WP_DEBUG', false); #
+        # define('WP_DEBUG_LOG', false); #
+        # define('WP_DEBUG_DISPLAY', false); #
+        # @ini_set('display_errors', 0); #
+
+
     volumes:
       - wordpress_data:/var/www/html
     networks:
       - wordpress_network
+    secrets:
+      - db_user
+      - db_password
+      - redis_password # Add redis_password to wordpress service as well
 
   nginx:
     depends_on:
       - wordpress
-    image: nginx:latest
+    image: nginx:1.25.x-alpine
     container_name: nginx
     ports:
-      - "8081:80"
+      - "8090:80"
+      - "8443:443"
+    environment:
+      NGINX_SERVER_NAME: spendoo.app
+      NGINX_SERVER_ALIAS: www.spendoo.app
+      NGINX_PORT: 80
+      NGINX_SSL_PORT: 443
+      NGINX_ROOT_DIR: /var/www/html
+      NGINX_INDEX: index.php index.html index.htm
+      NGINX_LOG_FORMAT: 'main "$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent" "$http_x_forwarded_for"'
+      NGINX_ACCESS_LOG: /var/log/nginx/access.log
+      NGINX_ERROR_LOG: /var/log/nginx/error.log
+      NGINX_CLIENT_BODY_BUFFER_SIZE: 128k
+      NGINX_CLIENT_HEADER_BUFFER_SIZE: 1k
+      NGINX_CLIENT_MAX_BODY_SIZE: 100M
+      NGINX_CLIENT_BODY_TIMEOUT: 60s
+      NGINX_CLIENT_HEADER_TIMEOUT: 60s
+      NGINX_SENDFILE: "on"
+      NGINX_TCP_NODELAY: "on"
+      NGINX_TCP_NOPUSH: "on"
+      NGINX_WORKER_PROCESSES: auto
+      NGINX_LARGE_CLIENT_HEADER_BUFFERS: 4 8k
+      NGINX_KEEPALIVE_TIMEOUT: 65
+      NGINX_SEND_TIMEOUT: 60
+      NGINX_RESET_TIMEDOUT_CONNECTION: "on"
+      NGINX_UNDERSCORES_IN_HEADERS: "on"
+      NGINX_CHARSET: "utf-8"
+      NGINX_CHARSET_TYPES: 'text/html text/plain text/css application/json application/javascript application/x-javascript application/xml application/xml+rss text/javascript image/svg+xml image/x-icon image/png image/jpeg image/gif'
+      
+      # Gzip settings
+      NGINX_GZIP_HTTP_VERSION: '1.1'
+      NGINX_GZIP: "on"
+      NGINX_GZIP_COMP_LEVEL: 5
+      NGINX_GZIP_MIN_LENGTH: 256
+      NGINX_GZIP_PROXIED: any
+      NGINX_GZIP_TYPES: 'text/plain text/css application/json application/javascript application/x-javascript application/xml application/xml+rss text/javascript application/font-woff2 application/font-woff image/svg+xml image/x-icon image/png image/jpeg image/gif'
+      NGINX_GZIP_VARY: "on"
+      NGINX_GZIP_DISABLE: 'msie6'
+      NGINX_SERVER_TOKENS: "off"
+
+      NGINX_TYPES_HASH_MAX_SIZE: 2048
+      NGINX_TYPES_HASH_BUCKET_SIZE: 64
+      NGINX_TYPES_HASH_MIN_USES: 1
+      NGINX_TYPES_HASH_BUCKETS: 64
+
+      NGINX_PREFER_SERVER_CIPHERS: "on"
+      NGINX_HTTP2: "true"
+      NGINX_REWRITE: "true"
+      NGINX_HSTS: "true"
+      NGINX_X_FRAME_OPTIONS: "SAMEORIGIN"
+      NGINX_X_CONTENT_TYPE_OPTIONS: "nosniff"
+      NGINX_X_XSS_PROTECTION: "1; mode=block"
+      NGINX_REFERRER_POLICY: "no-referrer-when-downgrade"
+      NGINX_CONTENT_SECURITY_POLICY: "default-src 'self'; \
+        img-src 'self' data:; \
+        script-src 'self' 'unsafe-inline' 'unsafe-eval' https://ajax.googleapis.com https://www.google-analytics.com; \
+        style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
+        font-src 'self' https://fonts.gstatic.com; \
+        connect-src 'self'; \
+        frame-src 'self' https://www.youtube.com; \
+        object-src 'none'; \
+        base-uri 'self';"
+      NGINX_STRICT_TRANSPORT_SECURITY: "max-age=31536000; includeSubDomains; preload"
+      NGINX_REWRITE_LOG: "off"
+
+      # SSL settings
+      NGINX_SSL: "on"
+      NGINX_ENABLE_SSL: "true"
+      NGINX_SSL_CERT: /etc/ssl/certs/ssl-cert-snakeoil.pem
+      NGINX_SSL_CERT_KEY: /etc/ssl/private/ssl-cert-snakeoil.key
+      NGINX_SSL_TRUSTED_CERT: /etc/ssl/certs/ca-certificates.crt
+      NGINX_SSL_DHPARAM: /etc/ssl/certs/dhparam.pem
+      NGINX_SSL_CIPHERS: 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305'
+      NGINX_SSL_PROTOCOLS: 'TLSv1.2 TLSv1.3'
+      NGINX_SSL_SESSION_TICKET: "on"
+      NGINX_SSL_SESSION_CACHE: "shared:SSL:10m"
+      NGINX_SSL_SESSION_TIMEOUT: "10m"
+      NGINX_SSL_STAPLING: "on"
+      NGINX_SSL_STAPLING_VERIFY: "on"
+      NGINX_SSL_STAPLING_RESPONSE_TIMEOUT: "5s"
+      NGINX_SSL_VERIFY_DEPTH: 2
+      NGINX_SSL_VERIFY_CLIENT: "off"
+      
+      NGINX_RESOLVER: "8.8.8.8 8.8.4.4"
+      NGINX_RESOLVER_TIMEOUT: "5s"
+      NGINX_RESOLVER_VALIDITY: "10s"
+      # Proxy settings
+      NGINX_PROXY_PASS: wordpress:9000
+      NGINX_PROXY_READ_TIMEOUT: "90s"
+      NGINX_PROXY_CONNECT_TIMEOUT: "90s"
+      NGINX_PROXY_SEND_TIMEOUT: "90s" 
+      NGINX_PROXY_BUFFER_SIZE: "16k"
+      NGINX_PROXY_BUFFERS: "4 16k"
+      NGINX_PROXY_BUSY_BUFFERS_SIZE: "32k"
+      # Proxy temporary file settings
+      NGINX_PROXY_MAX_TEMP_FILE_SIZE: "0"
+      NGINX_PROXY_TEMP_FILE_SIZE: "64k"
+      NGINX_PROXY_TEMP_FILE_WRITE_SIZE: "64k"
+      NGINX_PROXY_TEMP_PATH: /var/cache/nginx/proxy_temp
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    extra_hosts:
+      - "spendoo-app.eu:127.0.0.1" #  useful for local development
     volumes:
       - wordpress_data:/var/www/html
       - ./nginx-conf:/etc/nginx/conf.d
+      - ./ssl-certs:/etc/ssl/certs
+      - .
     networks:
       - wordpress_network
+    entrypoint: /etc/nginx/conf.d/entrypoint.sh
 
 volumes:
   db_data:
   wordpress_data:
+  redis_data:
 
 networks:
   wordpress_network:
     driver: bridge
+
+secrets:
+  db_root_password:
+    file: ./secrets/db_root_password.txt # Path to a file containing the root password
+  db_user:
+    file: ./secrets/db_user.txt          # Path to a file containing the database user
+  db_password:
+    file: ./secrets/db_password.txt      # Path to a file containing the database password
+  redis_password:
+    file: ./secrets/redis_password.txt   # Path to a file containing the Redis password

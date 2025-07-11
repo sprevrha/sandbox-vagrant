@@ -1,30 +1,34 @@
+VAGRANT_DIR=.
+
 # Makefile for setting up a Vagrant environment with a specific box and provisioning script
 install_vbguest_plugin:
 	@vagrant plugin list | findstr vagrant-vbguest >nul || vagrant plugin install vagrant-vbguest
 
-install_vbguest_to_vm: vagrant_fix install_vbguest_plugin
-
+install_vbguest_to_vm: install_vbguest_plugin
+	@echo "Updating Vagrant vbguest plugin code to be compatible with Ruby 3.2.0 and later:"
+	bash fix_vagrant.sh
 	@echo "Installing vagrant-vbguest plugin to VM..."
-	vagrant vbguest --do install --auto-reboot
-# force the plugin to attempt the vbguest upgrade and reboot the VM if needed.
 	vagrant vbguest --do install --auto-reboot
 	
 box_update: 
 	vagrant box update
 
-vagrant_fix: install_vbguest_plugin
-	@echo "Fixing Vagrant guest additions..."
-	bash fix_vagrant.sh
-# Target to run vagrant up after installation
 vagrant_up_basic: box_update 
+	cd $(VAGRANT_DIR)
 	@echo "Starting Vagrant basic environment..."
-	vagrant up --provision
+	vagrant up --provision-with "detect-arch","kernel"
+	vagrant reload --provision-with "essentials"
+	@echo "Vagrant basic environment is up and running."
 
-vagrant_up: vagrant_up_basic
-	@echo "Waiting 60 for the reboot to finish"
-	sleep 60
+vagrant_up_final: vagrant_up_basic 
+	cd $(VAGRANT_DIR)
 	@echo "Starting vagrant final provision"
-	vagrant reload --provision
+	vagrant provision --provision-with "docker","git","my-repo"
+
+vagrant_up: vagrant_up_final
+	cd $(VAGRANT_DIR)
+	@echo "Starting Docker environment..."
+	vagrant provision --provision-with "docker-up","cleanup"
 # Define the all target
 all: vagrant_up install_vbguest_to_vm
 
