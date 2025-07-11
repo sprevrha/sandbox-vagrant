@@ -20,23 +20,28 @@ vagrant_up_basic: box_update
 	vagrant reload --provision-with "essentials"
 	@echo "Vagrant basic environment is up and running."
 
-vagrant_up_final: vagrant_up_basic 
+vagrant_up_tools: vagrant_up_basic 
 	cd $(VAGRANT_DIR)
 	@echo "Starting vagrant final provision"
 	vagrant provision --provision-with "docker","git","my-repo"
 
-vagrant_up: vagrant_up_final
+vagrant_up: vagrant_up_tools install_vbguest_to_vm
 	cd $(VAGRANT_DIR)
 	@echo "Starting Docker environment..."
 	vagrant provision --provision-with "docker-up","cleanup"
-# Define the all target
-all: vagrant_up install_vbguest_to_vm
 
-# Clean up Vagrant environment
+vagrant_reload: 
+	cd $(VAGRANT_DIR)
+	@echo "Pulling from Git, Reloading Vagrant environment..."
+	vagrant reload --provision-with "my-repo","docker-up"
+	@echo "Vagrant environment reloaded."
+
+all: vagrant_up 
+
 clean:
 	@echo "Cleaning up Vagrant environment..."
 	vagrant destroy -f
 	@echo "Vagrant environment cleaned up."
 
-.PHONY:  vagrant_up all clean install_vbguest box_update
+.PHONY:  vagrant_up_basic vagrant_up_tools vagrant_up vagrant_reload all clean install_vbguest_plugin install_vbguest box_update
 .DEFAULT_GOAL := all

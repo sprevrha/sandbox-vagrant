@@ -13,13 +13,14 @@ services:
       MYSQL_PASSWORD_FILE: /run/secrets/db_password
     volumes:
       - db_data:/var/lib/mysql
+      - ./logs/db:/var/log/mysql
     networks:
       - wordpress_network
     secrets:
       - db_root_password
       - db_user
       - db_password
-
+    restart: unless-stopped
   redis:
     image: redis:7-alpine
     container_name: redis
@@ -123,8 +124,10 @@ services:
 
     volumes:
       - wordpress_data:/var/www/html
+      - ./logs/wordpress:/var/www/html/wp-content/debug.log
     networks:
       - wordpress_network
+    restart: unless-stopped
     secrets:
       - db_user
       - db_password
@@ -252,7 +255,7 @@ services:
       - wordpress_data:/var/www/html
       - ./nginx-conf:/etc/nginx/conf.d
       - ./ssl-certs:/etc/ssl/certs
-      - .
+      - ./nginx-logs:/var/log/nginx
     networks:
       - wordpress_network
     entrypoint: /etc/nginx/conf.d/entrypoint.sh

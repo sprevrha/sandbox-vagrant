@@ -33,6 +33,37 @@
 
 # Log files
 *.log
+dmesg
+syslog
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+nul
 
 # Vagrant configuration
 .vagrant
+
+
+# Docker secrets and SSL certs
+# secrets/
+# *.pem
+# *.key
+# *.crt
+# *.p12
+# *.pfx
+# *.jks
+
+# Docker Compose files
+docker-compose.override.yml
+docker-compose.prod.yml
+docker-compose.test.yml
+# Docker Swarm files
+docker-compose.swarm.yml
+# Dockerfile
+Dockerfile.prod
+Dockerfile.test
+Dockerfile.swarm
+# Docker build cache
+.dockerignore
