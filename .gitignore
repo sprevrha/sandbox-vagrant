@@ -32,14 +32,26 @@
 *.app
 
 # Log files
+logs/*
 *.log
-dmesg
+*.log.xz
+dmesg*
 syslog
+btmp*
+lastlog*
+wtmp*
+# Core dumps
+core*
+# Backup files
+*~
 
 # Temporary files
 *.tmp
 *.temp
 *.bak
+
+
+# Weird files
 nul
 
 # Vagrant configuration

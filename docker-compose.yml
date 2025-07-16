@@ -2,25 +2,67 @@
 # This file sets up a WordPress site with a MariaDB database and Nginx as FastCGI PHP frontend.
 # It includes the necessary environment variables and volume mounts for persistent storage. 
 
+volumes:
+  # Have Docker manage the database and redis data volumes.
+  redis_data:
+  db_data:
+  # wordpress volume is used to persist WordPress files, themes, plugins, and uploads. 
+  # So we use a bind mount to a local directory and define it in the service.
+  # wordpress_data: 
+
+networks:
+  ${DOCKER_NETWORK:-docker_network}:
+    # For simple setups, bridge is fine. 
+    # For more complex deployments or better performance/isolation, consider user-defined bridges or other network drivers.
+    driver: ${DOCKER_NETWORK_DRIVER:-bridge}
+    
+secrets:
+  db_root_password:
+    file: ./secrets/db_root_password.txt
+  db_user:
+    file: ./secrets/db_user.txt
+  db_password:
+    file: ./secrets/db_password.txt
+  redis_password:
+    file: ./secrets/redis_password.txt
 services:
   db:
-    image: mariadb:10.11
-    container_name: mariadb
+    image: ${DB_IMAGE:-mariadb:10.11}
+    container_name: ${DB_CONTAINER_NAME:-db}
     environment:
       MYSQL_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
-      MYSQL_DATABASE: wordpress
+      MYSQL_DATABASE: ${DB_NAME}
       MYSQL_USER_FILE: /run/secrets/db_user
       MYSQL_PASSWORD_FILE: /run/secrets/db_password
     volumes:
       - db_data:/var/lib/mysql
-      - ./logs/db:/var/log/mysql
+      - ${DOCKER_CONTAINER_LOG_DIR:-./logs}/db:/var/log/mysql
     networks:
-      - wordpress_network
+      - ${DOCKER_NETWORK:-docker_network}
     secrets:
       - db_root_password
       - db_user
       - db_password
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u $$MYSQL_USER --password=\"$$(cat /run/secrets/db_password)\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s # Increased start_period to 30s to allow MariaDB to initialize properly
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'  # MariaDB can be CPU intensive
+          memory: 1024M # MariaDB can use significant memory for caching
+        reservations:
+          cpus: '0.5'
+          memory: 512M
   redis:
     image: redis:7-alpine
     container_name: redis
@@ -31,11 +73,12 @@ services:
       - wordpress_network
     restart: unless-stopped
     healthcheck:
-      # Option 1: Using CMD-SHELL for robustness with secrets
-      test: ["CMD-SHELL", "redis-cli -a \"$$(cat /run/secrets/redis_password)\" ping | grep PONG"]
-      interval: 30s
-      timeout: 3s
+      # Using REDISCLI_AUTH environment variable for password which is generally more robust
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$(cat /run/secrets/redis_password)\" redis-cli ping | grep PONG"]
+      interval: 5s
+      timeout: 5s
       retries: 5
+      start_period: 20s # Increased start_period, 10s might be too short for Redis to fully initialize with password
     logging:
       driver: "json-file"
       options:
@@ -43,23 +86,39 @@ services:
         max-file: "3"
     secrets:
       - redis_password
-
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5' # Redis is often memory-bound, but CPU is still relevant
+          memory: 256M # Depending on cache size
+        reservations:
+          cpus: '0.2'
+          memory: 128M
   # WordPress service using PHP-FPM
   # This service runs the WordPress application with PHP-FPM.
   wordpress:
     depends_on:
-      - db
-      - redis
-    image: wordpress:latest-fpm
-    container_name: wordpress
+      db:
+        condition: service_healthy # Wait for DB to be healthy
+      redis:
+        condition: service_healthy # Wait for Redis to be healthy
+    image: ${WORDPRESS_IMAGE:-wordpress:6.4-php8.2-fpm-alpine}
+    container_name: ${WORDPRESS_CONTAINER_NAME:-wordpress}
+  # Example addition to wordpress service
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost/wp-admin/install.php"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s # Increased start_period to 30s to allow WordPress to initialize properly  
     environment:
-      WORDPRESS_DB_HOST: db:3306
+      WORDPRESS_DB_HOST: ${DB_CONTAINER_NAME:-db}:3306
       WORDPRESS_DB_USER_FILE: /run/secrets/db_user
       WORDPRESS_DB_PASSWORD_FILE: /run/secrets/db_password
-      WORDPRESS_DB_NAME: wordpress
+      WORDPRESS_DB_NAME: ${DB_NAME}
       WORDPRESS_CONFIG_EXTRA: |
-        define('WP_HOME', 'https://spendoo.app');
-        define('WP_SITEURL', 'https://spendoo.app');
+        define('WP_HOME', 'https://${APP_DOMAIN}');
+        define('WP_SITEURL', 'https://${APP_DOMAIN}');
         define('FORCE_SSL_ADMIN', true);
         // Reverse Proxy SSL Detection
         if (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https') {
@@ -83,17 +142,17 @@ services:
 
         define('DISABLE_WP_CRON', true);                  // Disable WP-Cron to use a real cron job instead
         define('XMLRPC_REQUEST', false);                  // Disable XML-RPC for security
-        define('REST_API_DISABLED', true);                // Disable the REST API for security
-        define('HEARTBEAT_DISABLED', true);               // Disable the WordPress heartbeat API
+        define('REST_API_DISABLED', false);               // completely disabling the REST API will break many WordPress functionalities
+        define('HEARTBEAT_DISABLED', false);              // Heartbeat API is crucial for real-time communication in the WordPress admin area
         define('AUTOMATIC_UPDATER_DISABLED', true);       // Disable automatic updates
-        add_filter('show_admin_bar', '__return_false');   // Disable the admin bar for all users
+        add_filter('show_admin_bar', '__return_false');   // Disable the admin bar for all users. While it cleans up the frontend, it removes convenient shortcuts for logged-in users. Consider if this is truly desired for all user roles.
         remove_action('wp_head', 'wp_generator');         // Disable the WordPress version in the HTML source
         remove_action('wp_head', 'print_emoji_detection_script', 7);  // Disable the emoji script
-        remove_action('wp_print_styles', 'print_emoji_styles');       // Disable the REST API link in the HTML source
-        remove_action('wp_head', 'rest_output_link_wp_head', 10);     // Disable the REST API link in the HTML source 
-        remove_action('wp_head', 'wp_oembed_add_discovery_links');    // Disable the oEmbed discovery links
-        remove_action('wp_head', 'wp_oembed_add_host_js');            // Disable the oEmbed JavaScript
-        add_filter('the_generator', '__return_empty_string');         // Disable the WordPress version in the RSS feed
+        remove_action('wp_print_styles', 'print_emoji_styles');      // Disable the REST API link in the HTML source
+        remove_action('wp_head', 'rest_output_link_wp_head', 10);    // Disable the REST API link in the HTML source 
+        remove_action('wp_head', 'wp_oembed_add_discovery_links');   // Disable the oEmbed discovery links
+        remove_action('wp_head', 'wp_oembed_add_host_js');           // Disable the oEmbed JavaScript
+        add_filter('the_generator', '__return_empty_string');        // Disable the WordPress version in the RSS feed
         // Disable the WordPress version in the HTML source
         add_filter('style_loader_src', 'remove_wp_version_from_css_js', 9999);
         add_filter('script_loader_src', 'remove_wp_version_from_css_js', 9999);
@@ -106,63 +165,71 @@ services:
         // Cache-Konfiguration
         define('WP_CACHE', true);
         define('WP_CACHE_KEY_SALT', 'spendoo_'); 
-        // Addional security settings
+        // Additional security settings
         define('FORCE_SSL_LOGIN', true);
         define('DISALLOW_FILE_EDIT', true);
         define('WP_ALLOW_REPAIR', false);
         define('WP_POST_REVISIONS', 5);
-        define('AUTOSAVE_INTERVAL', 300); // 5 minutes
-        define('WP_MEMORY_LIMIT', '256M');
-        define('WP_MAX_MEMORY_LIMIT', '512M');
+        define('AUTOSAVE_INTERVAL', 300); # 5 minutes
+        define('WP_MEMORY_LIMIT', '${WP_MEMORY_LIMIT}');
+        define('WP_MAX_MEMORY_LIMIT', '${WP_MAX_MEMORY_LIMIT}');
         // Debugging settings
         # Uncomment the following lines to disable debugging
         # define('WP_DEBUG', false); #
         # define('WP_DEBUG_LOG', false); #
         # define('WP_DEBUG_DISPLAY', false); #
         # @ini_set('display_errors', 0); #
-
-
     volumes:
-      - wordpress_data:/var/www/html
-      - ./logs/wordpress:/var/www/html/wp-content/debug.log
+      - ${DOCKER_BINDMOUNT_ROOT:-.}/wordpress_data:/var/www/html
+      - ${DOCKER_CONTAINER_LOG_DIR:-./logs}/wordpress/debug.log:/var/www/html/wp-content/debug.log
     networks:
-      - wordpress_network
+      - ${DOCKER_NETWORK:-docker_network}
     restart: unless-stopped
     secrets:
       - db_user
       - db_password
-      - redis_password # Add redis_password to wordpress service as well
-
+      - redis_password
+    # For production, we add resources.limits (e.g., cpus, memory) 
+    # to prevent any single container from consuming all host resources.
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
   nginx:
     depends_on:
-      - wordpress
-    image: nginx:1.25.x-alpine
-    container_name: nginx
+      wordpress:
+        condition: service_healthy
+    image: ${NGINX_IMAGE:-nginx:1.25.5-alpine}
+    container_name: ${NGINX_CONTAINER_NAME:-nginx}
     ports:
-      - "8090:80"
-      - "8443:443"
+      - "${NGINX_HTTP_PORT:-80}:80"
+      - "${NGINX_HTTPS_PORT:-443}:443"
     environment:
-      NGINX_SERVER_NAME: spendoo.app
-      NGINX_SERVER_ALIAS: www.spendoo.app
-      NGINX_PORT: 80
-      NGINX_SSL_PORT: 443
+      NGINX_SERVER_NAME: ${APP_DOMAIN}
+      NGINX_SERVER_ALIAS: www.${APP_DOMAIN} # Concatenated using APP_DOMAIN
+      NGINX_PORT: ${NGINX_HTTP_PORT:-80}
+      NGINX_SSL_PORT: ${NGINX_HTTPS_PORT:-443}
       NGINX_ROOT_DIR: /var/www/html
       NGINX_INDEX: index.php index.html index.htm
       NGINX_LOG_FORMAT: 'main "$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent" "$http_x_forwarded_for"'
-      NGINX_ACCESS_LOG: /var/log/nginx/access.log
-      NGINX_ERROR_LOG: /var/log/nginx/error.log
-      NGINX_CLIENT_BODY_BUFFER_SIZE: 128k
-      NGINX_CLIENT_HEADER_BUFFER_SIZE: 1k
-      NGINX_CLIENT_MAX_BODY_SIZE: 100M
-      NGINX_CLIENT_BODY_TIMEOUT: 60s
-      NGINX_CLIENT_HEADER_TIMEOUT: 60s
+      NGINX_ACCESS_LOG: ${LOG_PATH:-/var/log}/nginx/access.log
+      NGINX_ERROR_LOG:  ${LOG_PATH:-/var/log}/nginx/error.log
+      NGINX_CLIENT_BODY_BUFFER_SIZE: ${NGINX_CLIENT_BODY_BUFFER_SIZE}
+      NGINX_CLIENT_HEADER_BUFFER_SIZE: ${NGINX_CLIENT_HEADER_BUFFER_SIZE}
+      NGINX_CLIENT_MAX_BODY_SIZE: ${NGINX_CLIENT_MAX_BODY_SIZE}
+      NGINX_CLIENT_BODY_TIMEOUT: ${NGINX_CLIENT_BODY_TIMEOUT}
+      NGINX_CLIENT_HEADER_TIMEOUT: ${NGINX_CLIENT_HEADER_TIMEOUT}
       NGINX_SENDFILE: "on"
       NGINX_TCP_NODELAY: "on"
       NGINX_TCP_NOPUSH: "on"
       NGINX_WORKER_PROCESSES: auto
       NGINX_LARGE_CLIENT_HEADER_BUFFERS: 4 8k
-      NGINX_KEEPALIVE_TIMEOUT: 65
-      NGINX_SEND_TIMEOUT: 60
+      NGINX_KEEPALIVE_TIMEOUT: ${NGINX_KEEPALIVE_TIMEOUT}
+      NGINX_SEND_TIMEOUT: ${NGINX_SEND_TIMEOUT}
       NGINX_RESET_TIMEDOUT_CONNECTION: "on"
       NGINX_UNDERSCORES_IN_HEADERS: "on"
       NGINX_CHARSET: "utf-8"
@@ -171,18 +238,18 @@ services:
       # Gzip settings
       NGINX_GZIP_HTTP_VERSION: '1.1'
       NGINX_GZIP: "on"
-      NGINX_GZIP_COMP_LEVEL: 5
-      NGINX_GZIP_MIN_LENGTH: 256
+      NGINX_GZIP_COMP_LEVEL: ${NGINX_GZIP_COMP_LEVEL}
+      NGINX_GZIP_MIN_LENGTH: ${NGINX_GZIP_MIN_LENGTH}
       NGINX_GZIP_PROXIED: any
       NGINX_GZIP_TYPES: 'text/plain text/css application/json application/javascript application/x-javascript application/xml application/xml+rss text/javascript application/font-woff2 application/font-woff image/svg+xml image/x-icon image/png image/jpeg image/gif'
       NGINX_GZIP_VARY: "on"
       NGINX_GZIP_DISABLE: 'msie6'
       NGINX_SERVER_TOKENS: "off"
 
-      NGINX_TYPES_HASH_MAX_SIZE: 2048
-      NGINX_TYPES_HASH_BUCKET_SIZE: 64
-      NGINX_TYPES_HASH_MIN_USES: 1
-      NGINX_TYPES_HASH_BUCKETS: 64
+      NGINX_TYPES_HASH_MAX_SIZE: ${NGINX_TYPES_HASH_MAX_SIZE}
+      NGINX_TYPES_HASH_BUCKET_SIZE: ${NGINX_TYPES_HASH_BUCKET_SIZE}
+      NGINX_TYPES_HASH_MIN_USES: ${NGINX_TYPES_HASH_MIN_USES}
+      NGINX_TYPES_HASH_BUCKETS: ${NGINX_TYPES_HASH_BUCKETS}
 
       NGINX_PREFER_SERVER_CIPHERS: "on"
       NGINX_HTTP2: "true"
@@ -192,6 +259,8 @@ services:
       NGINX_X_CONTENT_TYPE_OPTIONS: "nosniff"
       NGINX_X_XSS_PROTECTION: "1; mode=block"
       NGINX_REFERRER_POLICY: "no-referrer-when-downgrade"
+
+      # CSP is quite restrictive, which is good for security, but might cause issues with some plugins or external scripts.
       NGINX_CONTENT_SECURITY_POLICY: "default-src 'self'; \
         img-src 'self' data:; \
         script-src 'self' 'unsafe-inline' 'unsafe-eval' https://ajax.googleapis.com https://www.google-analytics.com; \
@@ -207,42 +276,43 @@ services:
       # SSL settings
       NGINX_SSL: "on"
       NGINX_ENABLE_SSL: "true"
-      NGINX_SSL_CERT: /etc/ssl/certs/ssl-cert-snakeoil.pem
-      NGINX_SSL_CERT_KEY: /etc/ssl/private/ssl-cert-snakeoil.key
-      NGINX_SSL_TRUSTED_CERT: /etc/ssl/certs/ca-certificates.crt
-      NGINX_SSL_DHPARAM: /etc/ssl/certs/dhparam.pem
+      NGINX_SSL_CERT: ${NGINX_SSL_CERT_PATH}
+      NGINX_SSL_CERT_KEY: ${NGINX_SSL_KEY_PATH}
+      NGINX_SSL_TRUSTED_CERT: ${NGINX_SSL_TRUSTED_CERT_PATH}
+      NGINX_SSL_DHPARAM: ${NGINX_SSL_DHPARAM_PATH}
       NGINX_SSL_CIPHERS: 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305'
       NGINX_SSL_PROTOCOLS: 'TLSv1.2 TLSv1.3'
       NGINX_SSL_SESSION_TICKET: "on"
-      NGINX_SSL_SESSION_CACHE: "shared:SSL:10m"
-      NGINX_SSL_SESSION_TIMEOUT: "10m"
+      NGINX_SSL_SESSION_CACHE: ${NGINX_SSL_SESSION_CACHE}
+      NGINX_SSL_SESSION_TIMEOUT: ${NGINX_SSL_SESSION_TIMEOUT}
       NGINX_SSL_STAPLING: "on"
       NGINX_SSL_STAPLING_VERIFY: "on"
-      NGINX_SSL_STAPLING_RESPONSE_TIMEOUT: "5s"
-      NGINX_SSL_VERIFY_DEPTH: 2
+      NGINX_SSL_STAPLING_RESPONSE_TIMEOUT: ${NGINX_SSL_STAPLING_RESPONSE_TIMEOUT}
+      NGINX_SSL_VERIFY_DEPTH: ${NGINX_SSL_VERIFY_DEPTH}
       NGINX_SSL_VERIFY_CLIENT: "off"
       
-      NGINX_RESOLVER: "8.8.8.8 8.8.4.4"
-      NGINX_RESOLVER_TIMEOUT: "5s"
-      NGINX_RESOLVER_VALIDITY: "10s"
+      NGINX_RESOLVER: ${NGINX_RESOLVER}
+      NGINX_RESOLVER_TIMEOUT: ${NGINX_RESOLVER_TIMEOUT}
+      NGINX_RESOLVER_VALIDITY: ${NGINX_RESOLVER_VALIDITY}
       # Proxy settings
-      NGINX_PROXY_PASS: wordpress:9000
-      NGINX_PROXY_READ_TIMEOUT: "90s"
-      NGINX_PROXY_CONNECT_TIMEOUT: "90s"
-      NGINX_PROXY_SEND_TIMEOUT: "90s" 
-      NGINX_PROXY_BUFFER_SIZE: "16k"
-      NGINX_PROXY_BUFFERS: "4 16k"
-      NGINX_PROXY_BUSY_BUFFERS_SIZE: "32k"
+      NGINX_PROXY_PASS: ${WORDPRESS_CONTAINER_NAME:-wordpress}:9000
+      NGINX_PROXY_READ_TIMEOUT: ${NGINX_PROXY_READ_TIMEOUT}
+      NGINX_PROXY_CONNECT_TIMEOUT: ${NGINX_PROXY_CONNECT_TIMEOUT}
+      NGINX_PROXY_SEND_TIMEOUT: ${NGINX_PROXY_SEND_TIMEOUT} 
+      NGINX_PROXY_BUFFER_SIZE: ${NGINX_PROXY_BUFFER_SIZE}
+      NGINX_PROXY_BUFFERS: ${NGINX_PROXY_BUFFERS}
+      NGINX_PROXY_BUSY_BUFFERS_SIZE: ${NGINX_PROXY_BUSY_BUFFERS_SIZE}
       # Proxy temporary file settings
-      NGINX_PROXY_MAX_TEMP_FILE_SIZE: "0"
-      NGINX_PROXY_TEMP_FILE_SIZE: "64k"
-      NGINX_PROXY_TEMP_FILE_WRITE_SIZE: "64k"
+      NGINX_PROXY_MAX_TEMP_FILE_SIZE: ${NGINX_PROXY_MAX_TEMP_FILE_SIZE}
+      NGINX_PROXY_TEMP_FILE_SIZE: ${NGINX_PROXY_TEMP_FILE_SIZE}
+      NGINX_PROXY_TEMP_FILE_WRITE_SIZE: ${NGINX_PROXY_TEMP_FILE_WRITE_SIZE}
       NGINX_PROXY_TEMP_PATH: /var/cache/nginx/proxy_temp
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 20s
     restart: unless-stopped
     logging:
       driver: "json-file"
@@ -250,31 +320,20 @@ services:
         max-size: "10m"
         max-file: "3"
     extra_hosts:
-      - "spendoo-app.eu:127.0.0.1" #  useful for local development
+      - "${APP_DOMAIN}:127.0.0.1" 
     volumes:
-      - wordpress_data:/var/www/html
-      - ./nginx-conf:/etc/nginx/conf.d
-      - ./ssl-certs:/etc/ssl/certs
-      - ./nginx-logs:/var/log/nginx
+      - ${DOCKER_BINDMOUNT_ROOT:-.}/wordpress_data:/var/www/html
+      - ${DOCKER_BINDMOUNT_ROOT:-.}/nginx-conf:/etc/nginx/conf.d
+      - ${DOCKER_BINDMOUNT_ROOT:-.}/ssl-certs:/etc/ssl/certs
+      - ${DOCKER_BINDMOUNT_ROOT:-.}/nginx-logs:/var/log/nginx
     networks:
-      - wordpress_network
+      - ${DOCKER_NETWORK:-docker_network}
     entrypoint: /etc/nginx/conf.d/entrypoint.sh
-
-volumes:
-  db_data:
-  wordpress_data:
-  redis_data:
-
-networks:
-  wordpress_network:
-    driver: bridge
-
-secrets:
-  db_root_password:
-    file: ./secrets/db_root_password.txt # Path to a file containing the root password
-  db_user:
-    file: ./secrets/db_user.txt          # Path to a file containing the database user
-  db_password:
-    file: ./secrets/db_password.txt      # Path to a file containing the database password
-  redis_password:
-    file: ./secrets/redis_password.txt   # Path to a file containing the Redis password
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5' # Nginx is usually efficient but needs CPU for SSL/Gzip
+          memory: 128M # Fairly low memory footprint
+        reservations:
+          cpus: '0.1'
+          memory: 64M
