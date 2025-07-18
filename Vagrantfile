@@ -1,19 +1,13 @@
 ## Vagrantfile for setting up a VM with
-# Docker, Git, and Docker Compose.
+# Docker, Git, and (standalone) Docker Compose.
 # It will then clone a specified Git repository and start the Docker containers defined in a docker-compose.yml file.
 
 unless  Vagrant.has_plugin?("vagrant-scp") && 
-  Vagrant.has_plugin?("vagrant-docker-compose") && 
   Vagrant.has_plugin?("dotenv")
   # Install vagrant-docker-compose if not installed
   unless Vagrant.has_plugin?("vagrant-scp")
     system("vagrant plugin install vagrant-scp")
     puts "vagrant-scp plugin installed."
-  end
-  # Install vagrant-docker-compose if not installed
-  unless Vagrant.has_plugin?("vagrant-docker-compose")
-    system("vagrant plugin install vagrant-docker-compose")
-    puts "vagrant-docker-compose plugin installed."
   end
   # Install vagrant-vm if not installed
   unless Vagrant.has_plugin?("dotenv")
@@ -48,8 +42,8 @@ Vagrant.configure("2") do |config|
   config.vm.box = ENV["VAGRANT_BOX_NAME"] # Use a very common box for testing
   config.vm.network "forwarded_port", guest: ENV["VAGRANT_GUEST_HTTP_PORT"].to_i, host: ENV["VAGRANT_HOST_HTTP_PORT"].to_i
   config.vm.network "forwarded_port", guest: ENV["VAGRANT_GUEST_HTTPS_PORT"].to_i, host: ENV["VAGRANT_HOST_HTTPS_PORT"].to_i
-  puts "Setting Host Name: #{ENV['VAGRANT_HOST_NAME']}"
-  config.vm.hostname = ENV['VAGRANT_HOST_NAME']
+  puts "Setting Host Name: #{ENV['VAGRANT_GUEST_NAME']}"
+  config.vm.hostname = ENV['VAGRANT_GUEST_NAME']
   config.vm.provider ENV['VAGRANT_VM_PROVIDER'] do |vim|
     vim.memory = ENV['VAGRANT_VM_MEMORY']
     vim.cpus = ENV['VAGRANT_VM_CPUS']
@@ -60,7 +54,7 @@ Vagrant.configure("2") do |config|
   config.hostmanager.manage_host = true # Add/remove host entries for the VM
   config.hostmanager.manage_guest = true # (Optional) Manage guest /etc/hosts for multi-VM setups
   # Define the hostname(s) for your VM
-  config.hostmanager.aliases = ["www.#{ENV['VAGRANT_HOST_NAME']}"] # Add aliases if needed
+  config.hostmanager.aliases = ["www.#{ENV['VAGRANT_GUEST_NAME']}"] # Add aliases if needed
   #  config.vm.network "private_network", ip: "192.168.33.10" # Example IP
   config.cache.scope = :box # cachier plugin - cashing per base box
 
@@ -69,7 +63,9 @@ Vagrant.configure("2") do |config|
   rsync__args = ["--verbose", "--archive", "--compress", "--delete",
     "--exclude=.*", "--exclude=logs",
     "--exclude=tmp", "--exclude=cache", 
-    "--exclude=Vagrantfile"
+    "--exclude=Vagrantfile",
+    "--include=.env"
+
   ]   
   # VS Code bug workaround - Construct the ENTIRE SSH command string as a single unit
   private_key_path_for_ssh = Pathname.new(Dir.pwd).join(
@@ -81,7 +77,7 @@ Vagrant.configure("2") do |config|
   end
   if ENV['VAGRANT_APPCODE_SYNC_METHOD'] == 'rsync'
     # ...
-    config.vm.synced_folder ".", ENV['VAGRANT_VM_INSTALL_DIR'], type: "rsync",
+    config.vm.synced_folder ".", ENV['GUEST_CODE_DIR'], type: "rsync",
       rsync__args: rsync__args,
       rsync__ssh_args: ["ssh #{my_rsync_ssh_command__option_string}"],
       rsync__auto: true
@@ -98,7 +94,7 @@ Vagrant.configure("2") do |config|
     rsync__auto: true
 
   # Start a Browser once the box is completely up
-  app_url = "https://#{ENV['VAGRANT_HOST_NAME']}:#{ENV['VAGRANT_HOST_HTTPS_PORT']}"
+  app_url = "https://#{ENV['VAGRANT_GUEST_NAME']}:#{ENV['VAGRANT_HOST_HTTPS_PORT']}"
   # Get the browser command using your helper module
   browser_command = BrowserHelper.get_browser_command(app_url, ENV['VAGRANT_HOST_BROWSER'])
 
@@ -112,7 +108,7 @@ Vagrant.configure("2") do |config|
 
   ##############
   # PROVISIONERS
-  
+
   # Detect and export ARCH globally
   config.vm.provision "detect-arch",
     run: "once",
@@ -279,26 +275,29 @@ Vagrant.configure("2") do |config|
       sudo apt-get install -y \
         docker-ce \
         docker-ce-cli \
-        containerd.io \
-        docker-compose-plugin
-
+        containerd.io
       echo "Verify that Docker is installed correctly"
       if ! command -v docker >/dev/null 2>&1; then
         echo "Docker installation failed."
         exit 1
       fi
-      echo "Installed correctly"
+      DOCKER_VERSION=$(docker --version)
+      echo "Installed Docker correctly: $DOCKER_VERSION"
+      echo "Installing the latest version of Docker Compose..."
+      # Install Docker Compose
+      sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+      sudo chmod +x /usr/local/bin/docker-compose
 
-      echo "Verify that Docker Compose v2 is installed correctly..."
-      if ! docker compose version 2>&1 | grep -q 'Docker Compose version'; then
-        echo "failed."
+      echo "Verify that Docker Compose is installed correctly..."
+      if ! docker-compose --version >/dev/null 2>&1; then
+        echo "Docker Compose installation failed."
         exit 1
       fi
-      echo "Installed correctly"
+      DOCKER_COMPOSE_VERSION=$(docker-compose --version)
+      echo "Installed Docker Compose correctly: $DOCKER_COMPOSE_VERSION"
 
       echo "Add the vagrant user to the docker group"
-      sudo usermod -aG docker vagrant
-
+      sudo usermod -aG docker vagrant      
       echo "Enable and start Docker"
       sudo systemctl enable docker
       sudo systemctl start docker
@@ -327,9 +326,13 @@ Vagrant.configure("2") do |config|
     type: "shell", 
     inline: <<-SHELL
       set -e
-      sudo mkdir -p #{ENV['VAGRANT_APPCODE_DIR']}
-      sudo mkdir -p #{ENV['VAGRANT_APPCONF_DIR']}
-  SHELL
+      sudo mkdir -p #{ENV['GUEST_CODE_DIR']}
+      sudo mkdir -p #{ENV['GUEST_LOG_DIR']}
+      sudo mkdir -p #{ENV['GUEST_CONF_DIR']}
+      sudo chmod 777 #{ENV['GUEST_CODE_DIR']}
+      sudo chmod 777 #{ENV['GUEST_LOG_DIR']}
+      sudo chmod 777 #{ENV['GUEST_CONF_DIR']}
+    SHELL
 
   config.vm.provision "git-pull",
   run: "always",
@@ -339,7 +342,7 @@ Vagrant.configure("2") do |config|
     set -e 
     echo "Method is #{ENV['VAGRANT_APPCODE_SYNC_METHOD']}"
     if [ "#{ENV['VAGRANT_APPCODE_SYNC_METHOD']}" = "git-pull" ]; then
-      INSTALL_DIR="#{ENV['VAGRANT_APPCODE_DIR']}"
+      GIT_DIR="#{ENV['GUEST_CODE_DIR']}"
       GIT_REPO_URL="#{ENV['GIT_REPO_URL']}"
       GIT_BRANCH="#{ENV['GIT_BRANCH']}"
 
@@ -353,14 +356,14 @@ Vagrant.configure("2") do |config|
       fi
 
       # --- Logic for existing vs. new repository ---
-      if [ ! -d "${INSTALL_DIR}" ]; then
+      if [ ! -d "${GIT_DIR}" ]; then
         # Directory does not exist, perform initial clone
-        echo "Directory '${INSTALL_DIR}' does not exist. Cloning repository..."
-        git clone -b "${GIT_BRANCH}" "${GIT_REPO_URL}" "${INSTALL_DIR}"
-      elif [ -d "${INSTALL_DIR}/.git" ]; then
+        echo "Directory '${GIT_DIR}' does not exist. Cloning repository..."
+        git clone -b "${GIT_BRANCH}" "${GIT_REPO_URL}" "${GIT_DIR}"
+      elif [ -d "${GIT_DIR}/.git" ]; then
         # Directory exists and is a git repository, perform pull/checkout
-        echo "Directory '${INSTALL_DIR}' exists and is a Git repository. Ensuring correct branch and pulling updates..."
-        cd "${INSTALL_DIR}"
+        echo "Directory '${GIT_DIR}' exists and is a Git repository. Ensuring correct branch and pulling updates..."
+        cd "${GIT_DIR}"
 
         # Fetch all remote branches and tags
         git fetch origin
@@ -387,21 +390,25 @@ Vagrant.configure("2") do |config|
           # Already on the desired branch, just pull latest changes (hard reset to ensure exact match)
           echo "Already on branch '${GIT_BRANCH}'. Resetting to latest remote state..."
           git reset --hard "origin/${GIT_BRANCH}"
+          if git pull origin "${GIT_BRANCH}"; then
+            echo "Successfully pulled latest changes for branch '${GIT_BRANCH}'."
+          else
+            echo "ERROR: Failed to pull latest changes for branch '${GIT_BRANCH}'." >&2
+            exit 1
+          fi
         fi
-      else
         # Directory exists but is NOT a git repository or is not empty
-        if [ -d "${INSTALL_DIR}" ] && [ -z "$(find "${INSTALL_DIR}" -mindepth 1 -print -quit)" ]; then
-          echo "The directory '${INSTALL_DIR}' is empty. Deleting and cloning."
-          rm -rf "${INSTALL_DIR}"
-          git clone -b "${GIT_BRANCH}" "${GIT_REPO_URL}" "${INSTALL_DIR}"
-        else
-          echo "ERROR: '${INSTALL_DIR}' exists but is not empty or a Git repository. Cannot clone." >&2
-          exit 1
-        fi
+      elif [ -d "${GIT_DIR}" ] && [ -z "$(find "${GIT_DIR}" -mindepth 1 -print -quit)" ]; then
+        echo "The directory '${GIT_DIR}' is empty. Deleting and cloning."
+        rm -rf "${GIT_DIR}"
+        git clone -b "${GIT_BRANCH}" "${GIT_REPO_URL}" "${GIT_DIR}"
+      else
+        echo "ERROR: '${GIT_DIR}' exists but is not empty or a Git repository. Cannot clone." >&2
+        exit 1
       fi
 
       # Ensure correct ownership after Git operations
-      sudo chown -R vagrant:vagrant "${INSTALL_DIR}"
+      sudo chown -R vagrant:vagrant "${GIT_DIR}"
 
     else
       echo "Sync method is not 'git-pull', skipping Git operations."
@@ -409,22 +416,76 @@ Vagrant.configure("2") do |config|
     fi
   SHELL
 
-  dirs_to_copy = ENV['VAGRANT_EXTRA_DIRS_TO_COPY'].to_s.split(' ')
-  dirs_to_copy.each do |dir|
+  to_copy = ENV['COPY_TO_GUEST_CONF_DIR'].to_s.split(' ')
+  to_copy.each do |item|
       config.vm.provision "file", 
         run: "always", 
         preserve_order: true,
-        source: dir, 
-        destination: "#{ENV['VAGRANT_APPCONF_DIR']}/#{dir}"
+        source: item, 
+        destination: "#{ENV['GUEST_CONF_DIR']}/#{item}"
   end
-    # inline: <<-SHELL
-    #   set -e
 
-    #   IFS=' ' read -r -a dirs_array <<< "#{ENV['VAGRANT_EXTRA_DIRS_TO_COPY']}"
-    #   for dir in "${dirs_array[@]}"; do
-    #     echo "Copying $dir to #{ENV['VAGRANT_VM_INSTALL_DIR']}"
-    #     scp #{my_rsync_ssh_command__option_string} -r "./$dir" vagrant@127.0.0.1:#{ENV['VAGRANT_VM_INSTALL_DIR']}
-    # SHELL
+  # Docker Compose provisioner
+  config.vm.provision "run-docker-compose", 
+    run: "always",
+    preserve_order: true,
+    type: "shell", inline: <<-SHELL
+      # Navigate to the directory containing the docker-compose.yml file
+      cd #{ENV['GUEST_CODE_DIR']}
+      # Ensure the docker-compose.yml file exists
+      if [ ! -f "#{ENV['GUEST_CODE_DIR']}/#{ENV['DOCKER_COMPOSE_FILE']}" ]; then
+        echo "ERROR: Docker Compose file not found!"
+        exit 1
+      fi
+      # Ensure the environment file exists
+      if [ ! -f ".env" ]; then
+        echo "ERROR: Environment file not found at .env"
+        exit 1
+      fi
+      # Ensure Docker is running
+      if ! systemctl is-active --quiet docker; then
+        echo "Starting Docker..."
+        sudo systemctl start docker
+      fi
+      # Ensure Docker Compose is installed
+      if ! command -v docker-compose >/dev/null 2>&1; then
+        echo "ERROR: Docker Compose is not installed!"
+        exit 1
+      fi
+      # Ensure the Docker Compose file is valid
+      echo "Validating Docker Compose file..."
+      # Use the installed version of Docker Compose to validate the file
+      echo "docker-compose -f #{ENV['GUEST_CODE_DIR']}/#{ENV['DOCKER_COMPOSE_FILE']} --env-file #{ENV['GUEST_CONF_DIR']}/.env config"
+      OUTPUT=$(docker-compose -f "#{ENV['GUEST_CODE_DIR']}/#{ENV['DOCKER_COMPOSE_FILE']}" --env-file "#{ENV['GUEST_CONF_DIR']}/.env" config 2>&1)
+
+      if [ $? -ne 0 ]; then
+        echo "ERROR: Docker Compose file is invalid!"
+        echo "$OUTPUT"  # Display the error output
+        exit 1
+      fi
+      # Pull the latest images defined in the docker-compose.yml file
+      docker-compose -f "#{ENV['GUEST_CODE_DIR']}/#{ENV['DOCKER_COMPOSE_FILE']}" --env-file "#{ENV['GUEST_CONF_DIR']}/.env" pull
+      # Stop and remove any existing containers defined in the docker-compose.yml file
+      docker-compose -f "#{ENV['GUEST_CODE_DIR']}/#{ENV['DOCKER_COMPOSE_FILE']}" --env-file "#{ENV['GUEST_CONF_DIR']}/.env" down
+      # Start the containers defined in the docker-compose.yml file
+      echo "Starting Docker Compose services..."
+      # Run Docker Compose using the installed version
+      docker-compose up -d --env-file "#{ENV['GUEST_CONF_DIR']}/.env" --project-name "#{ENV['APP_NAME']}" --file "#{ENV['GUEST_CODE_DIR']}/#{ENV['DOCKER_COMPOSE_FILE']}" --remove-orphans
+      if [ $? -ne 0 ]; then
+        echo "ERROR: Failed to start Docker Compose services!"
+        exit 1
+      fi
+  SHELL
+
+    # Final provisioner: cleanup and finish
+  config.vm.provision "cleanup", run: "always", preserve_order: true,
+  type: "shell",
+  inline: <<-SHELL
+    echo "Cleaning up..."
+    sudo apt-get autoremove -y
+    sudo apt-get clean
+    echo "Provisioning complete."
+SHELL
 
 
 end
