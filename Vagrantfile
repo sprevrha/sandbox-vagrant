@@ -437,11 +437,28 @@ Vagrant.configure("2") do |config|
         echo "ERROR: Docker Compose file not found!"
         exit 1
       fi
-      # Ensure the environment file exists
-      if [ ! -f ".env" ]; then
-        echo "ERROR: Environment file not found at .env"
+      # We may have multiple env files, so we will collect them in an array
+      OUR_ENV_FILES=("#{ENV['GUEST_CODE_DIR']}/.env" "#{ENV['GUEST_CONF_DIR']}/.env" )
+      declare -a ALL_ENV_FILES=("${OUR_ENV_FILES[@]}" "${ENV_FILES[@]}")
+
+      VALID_ENV_FILES=()  # Array to hold valid env file options
+
+      # Iterate over the array of environment files
+      for env_file in "${ALL_ENV_FILES[@]}"; do
+
+        # Check if the environment file exists
+        if [ -f "$env_file" ]; then
+          VALID_ENV_FILES+=("--env-file $env_file")  # Add to valid env files array
+        else
+          echo "$env_file not found, skipping."
+        fi
+      done
+      if [ ${#VALID_ENV_FILES[@]} -eq 0 ]; then
+        echo "ERROR: No valid environment files found!"
         exit 1
       fi
+      echo "Using environment files: ${VALID_ENV_FILES[@]}"
+
       # Ensure Docker is running
       if ! systemctl is-active --quiet docker; then
         echo "Starting Docker..."
@@ -455,8 +472,8 @@ Vagrant.configure("2") do |config|
       # Ensure the Docker Compose file is valid
       echo "Validating Docker Compose file..."
       # Use the installed version of Docker Compose to validate the file
-      echo "docker-compose -f #{ENV['GUEST_CODE_DIR']}/#{ENV['DOCKER_COMPOSE_FILE']} --env-file #{ENV['GUEST_CONF_DIR']}/.env config"
-      OUTPUT=$(docker-compose -f "#{ENV['GUEST_CODE_DIR']}/#{ENV['DOCKER_COMPOSE_FILE']}" --env-file "#{ENV['GUEST_CONF_DIR']}/.env" config 2>&1)
+      echo "docker-compose -f #{ENV['GUEST_CODE_DIR']}/#{ENV['DOCKER_COMPOSE_FILE']} "${VALID_ENV_FILES[@]}" config"
+      OUTPUT=$(docker-compose -f "#{ENV['GUEST_CODE_DIR']}/#{ENV['DOCKER_COMPOSE_FILE']}" ${VALID_ENV_FILES[@]} config 2>&1)
 
       if [ $? -ne 0 ]; then
         echo "ERROR: Docker Compose file is invalid!"
@@ -464,13 +481,13 @@ Vagrant.configure("2") do |config|
         exit 1
       fi
       # Pull the latest images defined in the docker-compose.yml file
-      docker-compose -f "#{ENV['GUEST_CODE_DIR']}/#{ENV['DOCKER_COMPOSE_FILE']}" --env-file "#{ENV['GUEST_CONF_DIR']}/.env" pull
+      docker-compose -f "#{ENV['GUEST_CODE_DIR']}/#{ENV['DOCKER_COMPOSE_FILE']}" ${VALID_ENV_FILES[@]} pull
       # Stop and remove any existing containers defined in the docker-compose.yml file
-      docker-compose -f "#{ENV['GUEST_CODE_DIR']}/#{ENV['DOCKER_COMPOSE_FILE']}" --env-file "#{ENV['GUEST_CONF_DIR']}/.env" down
+      docker-compose -f "#{ENV['GUEST_CODE_DIR']}/#{ENV['DOCKER_COMPOSE_FILE']}" ${VALID_ENV_FILES[@]} down
       # Start the containers defined in the docker-compose.yml file
       echo "Starting Docker Compose services..."
       # Run Docker Compose using the installed version
-      docker-compose up -d --env-file "#{ENV['GUEST_CONF_DIR']}/.env" --project-name "#{ENV['APP_NAME']}" --file "#{ENV['GUEST_CODE_DIR']}/#{ENV['DOCKER_COMPOSE_FILE']}" --remove-orphans
+      docker-compose up -d --project-name "#{ENV['APP_NAME']}" --file "#{ENV['GUEST_CODE_DIR']}/#{ENV['DOCKER_COMPOSE_FILE']}" --remove-orphans
       if [ $? -ne 0 ]; then
         echo "ERROR: Failed to start Docker Compose services!"
         exit 1
